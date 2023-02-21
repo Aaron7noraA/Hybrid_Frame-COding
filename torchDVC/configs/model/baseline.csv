@@ -1,0 +1,5 @@
+code,name,type,args_path
+B,RIFE,RIFE,
+I,Intra_Codec,Intra_Codec,./configs/module/intra_cfg/intra.json
+E,MENet,MENet,
+M,Motion,MotionCoder,./configs/module/motion_cfg/motion.json

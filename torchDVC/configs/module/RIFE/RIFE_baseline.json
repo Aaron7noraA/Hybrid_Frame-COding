@@ -1,0 +1,9 @@
+{
+    "architecture": "GoogleHyperPriorCoder",
+    "quant": "RUN",
+    "num_features": 128,
+    "num_filters": 128,
+    "num_hyperpriors": 128,
+    "kernel_size": 5,
+    "coding_type": "res"
+}
