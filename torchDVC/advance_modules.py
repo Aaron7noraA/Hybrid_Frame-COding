@@ -28,27 +28,35 @@ class RIFE(nn.Module):
             }
         # if rank <= 0:
         self.RIFE.load_state_dict(convert(torch.load('{}/flownet.pkl'.format(path))))
+
+    def pad_img(self, img0, img1):
+        n, c, h, w = img0.shape
+        ph = ((h - 1) // 32 + 1) * 32
+        pw = ((w - 1) // 32 + 1) * 32
+        padding = (0, pw - w, 0, ph - h)
+        img0 = F.pad(img0, padding)
+        img1 = F.pad(img1, padding)
+        return img0, img1
+
     def forward(self, data, prop):
         scale=1
         scale_list=[4, 2, 1]
         TTA=False
-        timestep=0.5,
-
+        timestep=0.5
+        
         img0 = data['x1']
-        B, C, H, W = img0.shape
-        assert H%16 == 0 and W%16 == 0, "latent shape is wrong"
-        y_h, y_w = H//16, W//16
-        assert H%64 == 0 and W%64 == 0, "hyper-prior latent shape is wrong"
-        z_h, z_w = y_h//4, y_w//4
         img1 = data['x2']
+        # img0, img1 = self.pad_img(img0, img1)
+        # print("img0", img0.shape)
+
         for i in range(3):
             scale_list[i] = scale_list[i] * 1.0 / scale
         imgs = torch.cat((img0, img1), 1)
         flow, mask, merged, flow_teacher, merged_teacher, loss_distill = self.RIFE(imgs, scale_list, timestep=timestep)
         if TTA == False:
-            data['x_hat'] = merged[2]
-            data['likelihood'] = {'y':torch.zeros((B, C, y_h, y_w)).to(img0.device),
-                                        'z':torch.zeros((B, C, z_h, z_w)).to(img0.device)}
+            data['bframe/x_hat'] = merged[2]
+            data['frame_hat'] = merged[2]
+            data['hframe/likelihood'] = None
             # return merged[2]
         else:
             flow2, mask2, merged2, flow_teacher2, merged_teacher2, loss_distill2 = self.RIFE(imgs.flip(2).flip(3), scale_list, timestep=timestep)
@@ -81,8 +89,9 @@ class Intra_Codec(nn.Module):
         output = self.network(x)
         target_hat = self.aligner.resume(output['x_hat'])
         # data['xt_frame'] = target_hat.clamp(0., 1.)
-        data['x_hat'] = target_hat.clamp(0., 1.)
-        data['likelihood'] = output['likelihoods']
+        data['iframe/x_hat'] = target_hat.clamp(0., 1.)
+        data['frame_hat'] = target_hat.clamp(0., 1.)
+        data['iframe/likelihood'] = output['likelihoods']
 
 
 class MENet(nn.Module):

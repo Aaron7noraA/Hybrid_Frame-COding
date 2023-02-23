@@ -42,10 +42,12 @@ class IFBlock(nn.Module):
         if flow != None:
             flow = F.interpolate(flow, scale_factor = 1. / scale, mode="bilinear", align_corners=False) * 1. / scale
             x = torch.cat((x, flow), 1)
-        x = self.conv0(x)
-        x = self.convblock(x) + x
-        tmp = self.lastconv(x)
-        tmp = F.interpolate(tmp, scale_factor = scale * 2, mode="bilinear", align_corners=False)
+
+        # This convol maybe some problem
+        x = self.conv0(x) # out = 1/4 input
+        x = self.convblock(x) + x # out == in
+        tmp = self.lastconv(x) # out = 2 * in
+        tmp = F.interpolate(tmp, scale_factor = scale * 2, mode="bilinear", align_corners=False) # out = in * scale * 2
         flow = tmp[:, :4] * scale * 2
         mask = tmp[:, 4:5]
         return flow, mask

@@ -211,3 +211,18 @@ def add_colorbar(im, aspect=20, pad_fraction=0.5, **kwargs):
     cax = divider.append_axes("right", size=width, pad=pad)
     plt.sca(current_ax)
     return im.axes.figure.colorbar(im, cax=cax, **kwargs)
+
+
+def get_coding_ord(seq_num, seq_list, start, end):
+    mid = (start + end)//2
+    if mid == start:
+        return 
+    seq_list.append([start-1, mid-1, end-1])
+    get_coding_ord(seq_num, seq_list, start, mid)
+    get_coding_ord(seq_num, seq_list, mid, end)
+
+def get_coding_pairs(seq_num):
+    ord_list = []
+    get_coding_ord(seq_num, ord_list, 1, seq_num)
+    return [[0], [seq_num-1]] + ord_list
+

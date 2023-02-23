@@ -43,10 +43,11 @@ class VideoDataBframe(torchData):
 
 class VideoTestDataBframe(torchData):
 
-    def __init__(self, root, intra_period=32, mode="normal", used_datasets=['UVG', 'HEVC-B'], used_seqs=[]):
+    def __init__(self, root, intra_period=32, mode="normal", used_datasets=['UVG', 'HEVC-B'], used_seqs=[], transform=None):
         super(VideoTestDataBframe, self).__init__()
 
         self.root = root
+        self.transform = transform
         
         self.seq_len = {}
         for dataset, seqs in DATASETS.items():
@@ -68,11 +69,14 @@ class VideoTestDataBframe(torchData):
                                         1 + intra_period * intra_idx,
                                         1 + intra_period * (intra_idx + 1)])
 
+        # print("seq len: ",self.intra_list)
+
     def __len__(self):
         return len(self.intra_list)
 
     def __getitem__(self, idx):
         seq_name, dataset_name, frame_start, frame_end = self.intra_list[idx]
+        # print(seq_name, dataset_name, frame_start, frame_end)
         seq_len = self.seq_len[seq_name]
         
         imgs = []
@@ -82,7 +86,7 @@ class VideoTestDataBframe(torchData):
             imgs.append(to_tensor(imgloader(raw_path)))
 
 
-        return seq_name, stack(imgs)
+        return seq_name, self.transform(stack(imgs))
 
 class VideoDataIframe(torchData):
 

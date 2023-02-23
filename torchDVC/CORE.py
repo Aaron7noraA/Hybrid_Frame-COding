@@ -37,19 +37,21 @@ class CORE():
 
     @staticmethod
     def rate_fn(likelihood, input):
+        if likelihood == None:
+            return torch.zeros((1)).to(input.device).sum(), torch.zeros((1)).to(input.device).sum(), torch.zeros((1)).to(input.device).sum()
         rate_y = estimate_bpp(likelihood['y'], input=input).mean() # mean - over batch channel
         rate_z = estimate_bpp(likelihood['z'], input=input).mean()
         rate = rate_y + rate_z
 
         return rate, rate_y, rate_z
 
-    def forward_a_sequence(self, batch, prop):
+    def forward_a_sequence(self, batch, prop, store_pic=False):
         frame_seq = batch.permute((1,0,2,3,4)).to(self.args.device) # seq, B, C, H, W
         log_dict = logDict()
         recons = [None for _ in range(prop["num_frame"])]
         source = recons if prop['RNN'] else frame_seq
 
-        # print("pairs: ", prop['pairs'])
+
         for idx, p in enumerate(prop['pairs']):
             # print("process pair: ",p )
 
@@ -67,10 +69,6 @@ class CORE():
                 param['ftype'] = 'h'
             elif len(p) == 3 and len(prop['bmode']):
                 raise NotImplementedError('B frame mode not implemented !')
-                # inputs['x1'] = source[p[0]]
-                # inputs['xt'] = frame_seq[p[1]]
-                # inputs['x2'] = source[p[2]]
-                # param['ftype'] = 'b'
             else:
                 raise NotImplementedError('No such coding type')
             
@@ -79,25 +77,28 @@ class CORE():
                     inputs[k] = v.detach()
 
             data = self.model(prop[param['ftype']+'mode'], inputs, {**prop, **param}, self.header)
-
+            # print("data:", data.keys())
 
             # Distoration calculate 
-            log_ = self.logging(data, inputs['xt'], {**prop, **param})
+            log_ = self.logging(data, inputs['xt'], {**prop, **param}, idx, store_pic)
 
             output_idx = p[1] if len(p) > 1 else p[0]
-            recons[output_idx] = data['x_hat']
+            recons[output_idx] = data['frame_hat']
             log_dict[output_idx] = log_
             # print("final dict: ", log_dict)
         return log_dict
 
 
-    def logging(self, data, target, param):
+    def logging(self, data, target, param, idx, store_frame=False):
         log_dict = logDict()
+        if store_frame:
+            log_dict['out_img'] = data["frame_hat"]
+
         ftype = param['ftype']
         loss = 0.
 
-        x_hat = data['x_hat']
-        likelihood = data['likelihood']
+        x_hat = data["frame_hat"]
+        likelihood = data[ftype+"frame/likelihood"]
 
         # PSNR MS-SSIM
         psnr, ssim = self.quality_fn(x_hat, target)
@@ -107,6 +108,7 @@ class CORE():
 
         # rate estimation
         r, ry, rz = self.rate_fn(likelihood, input=target)
+        
         # log_dict.append(f"{ftype}/rate", r)
         log_dict.append(f"{ftype}/rate_y", ry)
         log_dict.append(f"{ftype}/rate_z", rz)
@@ -118,7 +120,9 @@ class CORE():
         loss += r
 
         # This is to record total rate & loss in a pair
-        log_dict.append(f"Loss", loss)
+        log_dict.append("Loss", loss)
+
+
 
         return log_dict
 

@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from dataset.dataloader import VideoDataBframe, VideoTestDataBframe
 from dataset.dataset import DATASETS, SEQUENCES, seq_to_dataset
-from utils import logDict, get_prop, seed_everything
+from utils import logDict, get_prop, seed_everything, get_coding_pairs
 from CORE import CORE
 from models import Baseline
 from types import SimpleNamespace
@@ -23,6 +23,8 @@ class Trainer(CORE):
         self.curr_prop = get_prop(args.start_epoch, self.process)
         self.setup()
         self.configure_optimizers()
+        self.intra_period = args.intra_period
+        self.current_epoch = 0
 
     def tqdm_bar(self, mode, pbar, loss):
         pbar.set_description(f"({mode}) Epoch {self.current_epoch}, phase={self.curr_prop['pmode']}", refresh=False)
@@ -48,8 +50,15 @@ class Trainer(CORE):
             cutN = None
         self.train_dataset = VideoDataBframe(os.path.join(dataset_root, "vimeo_septuplet/"), 7, transform=self.transformer, cutN=cutN)
 
+        # Because RIFE only can get image with 32 times resolution
+        H = (1080//32)*32
+        W = (1920//32)*32
+        Testing_transform = transforms.Compose([
+            transforms.RandomCrop((H, W)),
+        ])
+        # mode == short : means only used 1 intra period 
         self.val_dataset = VideoTestDataBframe(os.path.join(dataset_root, "TestVideo"), intra_period=self.args.intra_period, 
-                                                    mode="short", used_datasets=self.args.test_datasets, used_seqs=self.args.test_seqs)
+                                                    mode="short", used_datasets=self.args.test_datasets, used_seqs=self.args.test_seqs, transform=Testing_transform)
     def fit(self, current_step=0):
         self.current_step = current_step
         self.current_epoch = self.args.start_epoch
@@ -71,9 +80,50 @@ class Trainer(CORE):
             if self.current_epoch % self.args.per_val == 0:
                 self.eval()
             self.training_epoch_end()
+
+    def training_epoch_end(self):  
+        prop = get_prop(self.current_epoch + 1, self.process)
+        if prop['hmode'] != self.curr_prop['hmode'] or prop['bmode'] != self.curr_prop['bmode']:
+            self.clear_opt_grad(prop)
+        if prop['epoch'] != self.curr_prop['epoch'] and 'lr_decay' in prop:
+            self.update_lr(prop)
+        self.curr_prop = prop
     
+    def update_lr(self, new_prop):
+        print(f"decay lr by factor: {new_prop['lr_decay']}")
+        for pg in self.optim.param_groups:
+            pg['lr'] *= new_prop['lr_decay']
+            print(pg['lr'])
+
+    def clear_opt_grad(self, new_prop):
+        """
+        remove the optimizer state (momentums ...) of frozen network to prevent updating.
+        (momentum can update parameters even without gradients)
+        if the network required grad before, but now it doesn't or even not in forward path
+        remove its optimizer state. 
+        """
+        curr_prop = self.curr_prop
+        for new_state, past_state in zip([new_prop['hmode'], new_prop['bmode']], [curr_prop['hmode'], curr_prop['bmode']]):
+            for p in past_state:
+                if p.isupper() and p not in new_state:
+                    entry = self.model.module_table[p.lower()]
+                    print(f"clear grad: {p}, {entry['name']}")
+                    for param in self.model.__getattr__(entry['name']).parameters(): 
+                        self.optim.state[param] = {} # remove all state (step, exp_avg, exp_avg_sg)
+
+    def save(self, path):
+        # self.model.update(force=True)
+        torch.save({
+            "state_dict": self.model.state_dict(),
+            "optimizer": self.optim.state_dict(),
+            "epoch": self.current_epoch,
+            "step": self.current_step            
+        }, path)
+        print(f"save ckpt to {path}")
+
     def training_step(self, batch):
         path, batch = batch
+        # print("III: ",batch.shape)
         prop = get_prop(self.current_epoch, self.process)
 
         # over-write prop['pairs]
@@ -82,6 +132,7 @@ class Trainer(CORE):
         prop['test'] = False 
 
         log_dict_per_idx = self.forward_a_sequence(batch, prop)
+        # print(log_dict_per_idx)
         log_dict = logDict()
         for log_ in log_dict_per_idx.values():
             log_dict.extend(log_)
@@ -102,6 +153,83 @@ class Trainer(CORE):
                 aux_loss += v
 
         return losses, aux_loss, logs
+
+    @torch.no_grad()
+    def validation_step(self, batch):       
+        seq_names, batch = batch # seq_num would be 33 (intra period 32 + back I-frame)
+        prop = get_prop(self.current_epoch, self.process)
+        prop = {k: v.lower() if 'mode' in k else v for k, v in prop.items()} # change modules to validation mode
+        prop.update({
+            'pairs': get_coding_pairs(self.intra_period+1), 'num_frame': batch.size(1), 'test': True, 'imode': 'i',
+            'seq_names': seq_names,  'first_p': True, 'first_b': True, 'RNN': prop['val_RNN']
+        })
+
+        if seq_names[0] in ['Kimono1', 'Jockey']:
+            store_pic = 1
+        else:
+            store_pic = 0
+        # store_pic = 1
+        log_dict_per_idx = self.forward_a_sequence(batch, prop, store_pic)
+
+        # logging
+        log_dict = logDict()
+        for i in range(prop['num_frame']-1): # no consider last I
+            log_dict.extend(log_dict_per_idx[i])
+
+        # store picture for specific sequence
+        if store_pic:
+            for idx, v in enumerate(log_dict['out_img']):
+                self.logger.log_image(v[0].cpu().numpy(), name=f'Epoch{self.current_epoch}_{seq_names[0]}_{idx}.png', image_channels="first", step=self.current_epoch, overwrite=False)
+    
+        log_dict['I+B/PSNR'] = []
+        log_dict['I+B/RATE'] = []
+        log_dict['I+B/MS-SSIM'] = []
+        log_dict['loss'] = []
+
+        for ftype in "ibph":
+            if f'{ftype}/Rate' in log_dict:
+                log_dict['I+B/PSNR'].extend(log_dict[f'{ftype}/PSNR'])
+                log_dict['I+B/MS-SSIM'].extend(log_dict[f'{ftype}/MS-SSIM'])
+                log_dict['I+B/RATE'].extend(log_dict[f'{ftype}/Rate'])
+                log_dict['loss'].extend(log_dict['Loss'])
+
+        final_logs = {"seq_name":seq_names[0]}
+        for k, v in log_dict.items():
+            if k == 'out_img':
+                continue
+            final_logs['val/' + k] = torch.mean(torch.tensor(v)).item()
+
+        return final_logs
+
+    @torch.no_grad()
+    def eval(self):
+        logs = []
+        dataloader = self.val_dataloader()
+        
+        for batch in (pbar := tqdm(dataloader, ncols=100)):
+            log = self.validation_step(batch)
+            self.tqdm_bar(f'val/{batch[0][0]}', pbar, log['val/loss'])
+            logs.append(log)
+
+        self.validation_epoch_end(logs)
+
+    @torch.no_grad()
+    def validation_epoch_end(self, outputs):        
+        dataset_rd = {k: logDict() for k in self.args.test_datasets}
+        for logs in outputs:
+            seq_name = logs.pop('seq_name')
+            dataset_rd[seq_to_dataset[seq_name]].extend(logs)
+           
+        loss_list = []
+        for d in dataset_rd.values():
+            loss_list.extend(d['val/loss'])
+        logs = {'val/loss': np.mean(loss_list)}
+        
+        for dataset_name, metrics in dataset_rd.items():
+            for k, v in metrics.items():
+                logs[k.replace('val/', f'val/{dataset_name}/')] = np.mean(v)
+        print('logs: ', logs)
+        self.logger.log_metrics(logs, step=self.current_step, epoch=self.current_epoch)
 
     def optimizer_step(self, loss):
         loss.backward()
@@ -157,7 +285,6 @@ if __name__ == '__main__':
     config_root = "./configs"
     
 
-    # region - args
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--model_config",     type=str, default="baseliqe.csv")
     parser.add_argument("--run_config",       type=str, default="scratch.cfg")
@@ -235,6 +362,7 @@ if __name__ == '__main__':
 
     # currently I only use RIFE model
     model = Baseline(args.model_config, lmda=args.lmda).to(args.device)
+
     # print(model)
     # model.load_state_dict('modules/RIFE/train_log', -1)
 
